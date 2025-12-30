@@ -1,20 +1,29 @@
+#!/usr/bin/env python3
 """
-ThreatHunter AI - Backend Server
-Real log analysis with Sigma rules and AI-powered threat detection
-
-Requirements:
-pip install flask flask-cors python-evtx pandas pyyaml openai
+ThreatHunter AI - Backend Server with FREE Google Gemini AI
+Real-time log analysis with AI-powered threat detection
 """
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
 import json
-import hashlib
 import re
+import hashlib
 from datetime import datetime
-from io import BytesIO
-import xml.etree.ElementTree as ET
+import pandas as pd
+import yaml
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+import requests
+
+# Import Google Gemini AI (FREE!)
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    print("⚠️ google-generativeai not installed. AI features disabled.")
 
 app = Flask(__name__)
 CORS(app)
@@ -25,330 +34,329 @@ REPORTS_FOLDER = 'reports'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
 
+# Initialize Gemini AI (FREE)
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+if GEMINI_API_KEY and GEMINI_AVAILABLE:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        print("✅ Google Gemini AI initialized (FREE)")
+    except Exception as e:
+        print(f"⚠️ Gemini initialization failed: {e}")
+        model = None
+else:
+    model = None
+    print("⚠️ Gemini API key not found. Set GEMINI_API_KEY environment variable.")
+
 # MITRE ATT&CK Mapping (subset for demo)
-MITRE_MAPPING = {
-    'ransomware': {
-        'tactics': ['Impact', 'Defense Evasion'],
-        'techniques': ['T1486', 'T1490'],
-        'names': ['Data Encrypted for Impact', 'Inhibit System Recovery']
-    },
-    'credential_dumping': {
-        'tactics': ['Credential Access'],
-        'techniques': ['T1003.001', 'T1003.002'],
-        'names': ['LSASS Memory', 'Security Account Manager']
-    },
-    'lateral_movement': {
-        'tactics': ['Lateral Movement'],
-        'techniques': ['T1021.001', 'T1021.002'],
-        'names': ['Remote Desktop Protocol', 'SMB/Windows Admin Shares']
-    },
-    'privilege_escalation': {
-        'tactics': ['Privilege Escalation'],
-        'techniques': ['T1068', 'T1078'],
-        'names': ['Exploitation for Privilege Escalation', 'Valid Accounts']
-    }
+MITRE_TACTICS = {
+    'T1003': {'name': 'Credential Dumping', 'tactic': 'Credential Access'},
+    'T1021': {'name': 'Remote Services', 'tactic': 'Lateral Movement'},
+    'T1059': {'name': 'Command-Line Interface', 'tactic': 'Execution'},
+    'T1070': {'name': 'Indicator Removal', 'tactic': 'Defense Evasion'},
+    'T1078': {'name': 'Valid Accounts', 'tactic': 'Defense Evasion'},
+    'T1486': {'name': 'Data Encrypted for Impact', 'tactic': 'Impact'},
+    'T1518': {'name': 'Software Discovery', 'tactic': 'Discovery'},
+    'T1068': {'name': 'Exploitation for Privilege Escalation', 'tactic': 'Privilege Escalation'},
+    'T1566': {'name': 'Phishing', 'tactic': 'Initial Access'},
+    'T1090': {'name': 'Proxy', 'tactic': 'Command and Control'},
+    'T1048': {'name': 'Exfiltration Over Alternative Protocol', 'tactic': 'Exfiltration'},
+    'T1136': {'name': 'Create Account', 'tactic': 'Persistence'}
 }
 
-# Threat detection patterns
-THREAT_PATTERNS = {
-    'ransomware': [
-        r'vssadmin.*delete.*shadows',
-        r'wmic.*shadowcopy.*delete',
-        r'bcdedit.*recoveryenabled.*no',
-        r'\.encrypted$|\.locked$|\.crypted$',
-    ],
-    'credential_dumping': [
-        r'mimikatz|sekurlsa',
-        r'procdump.*lsass',
-        r'reg.*save.*(sam|system|security)',
-        r'pypykatz',
-    ],
-    'lateral_movement': [
-        r'psexec|wmiexec|smbexec',
-        r'\\\\.*\\admin\$',
-        r'Logon Type: 3.*NTLM',
-        r'net use.*\\\\',
-    ],
-    'suspicious_process': [
-        r'powershell.*-enc.*|.*-encodedcommand',
-        r'cmd.exe.*/c.*echo.*>',
-        r'rundll32.*javascript',
-        r'regsvr32.*\/s.*\/u.*scrobj.dll',
-    ],
-    'persistence': [
-        r'HKLM\\.*\\Run|HKCU\\.*\\Run',
-        r'schtasks.*/create',
-        r'New-Service|sc.*create',
-        r'WMI.*EventConsumer',
-    ],
-    'c2_communication': [
-        r'\.onion',
-        r'443.*185\.220\.|.*tor',
-        r'User-Agent:.*python|curl|wget',
-        r'POST.*\/upload\.php',
-    ]
-}
+# Sigma-like detection rules (simplified)
+DETECTION_RULES = [
+    {
+        'id': 'mimikatz_detection',
+        'name': 'Mimikatz Credential Dumping',
+        'severity': 'critical',
+        'mitre': 'T1003',
+        'patterns': [r'mimikatz', r'lsass\.exe', r'sekurlsa', r'procdump.*lsass']
+    },
+    {
+        'id': 'ransomware_indicators',
+        'name': 'Ransomware Activity',
+        'severity': 'critical',
+        'mitre': 'T1486',
+        'patterns': [r'\.encrypted', r'\.locked', r'ransom', r'\.crypt', r'YOUR_FILES_ARE_ENCRYPTED']
+    },
+    {
+        'id': 'lateral_movement',
+        'name': 'Lateral Movement via WMI/PSExec',
+        'severity': 'high',
+        'mitre': 'T1021',
+        'patterns': [r'psexec', r'wmic.*process.*call.*create', r'\\\\.*\\admin\$', r'net use.*\\c\$']
+    },
+    {
+        'id': 'suspicious_powershell',
+        'name': 'Suspicious PowerShell Execution',
+        'severity': 'high',
+        'mitre': 'T1059',
+        'patterns': [r'powershell.*-enc', r'powershell.*bypass', r'powershell.*hidden', r'IEX.*Net\.WebClient']
+    },
+    {
+        'id': 'brute_force_ssh',
+        'name': 'SSH Brute Force Attempt',
+        'severity': 'high',
+        'mitre': 'T1078',
+        'patterns': [r'Failed password.*ssh', r'authentication failure.*ssh', r'Invalid user.*ssh']
+    },
+    {
+        'id': 'privilege_escalation',
+        'name': 'Privilege Escalation Attempt',
+        'severity': 'critical',
+        'mitre': 'T1068',
+        'patterns': [r'sudo.*COMMAND', r'su\s+root', r'PsExec.*-s\s+', r'whoami.*admin']
+    },
+    {
+        'id': 'data_exfiltration',
+        'name': 'Potential Data Exfiltration',
+        'severity': 'high',
+        'mitre': 'T1048',
+        'patterns': [r'curl.*-d\s+', r'wget.*--post', r'ftp.*PUT', r'scp.*sensitive']
+    },
+    {
+        'id': 'log_clearing',
+        'name': 'Security Log Clearing',
+        'severity': 'high',
+        'mitre': 'T1070',
+        'patterns': [r'wevtutil.*cl.*security', r'Clear-EventLog', r'rm.*\.log', r'journalctl.*--vacuum']
+    },
+    {
+        'id': 'suspicious_network',
+        'name': 'Suspicious Network Connection',
+        'severity': 'medium',
+        'mitre': 'T1090',
+        'patterns': [r'nc.*-l.*-p', r'netcat', r'reverse.*shell', r'meterpreter']
+    },
+    {
+        'id': 'account_creation',
+        'name': 'Suspicious Account Creation',
+        'severity': 'medium',
+        'mitre': 'T1136',
+        'patterns': [r'net user.*\/add', r'useradd', r'New-LocalUser', r'adduser']
+    }
+]
+
 
 def extract_iocs(log_content):
-    """Extract Indicators of Compromise from logs"""
+    """Extract IOCs (IP addresses, domains, hashes) from logs"""
     iocs = {
-        'ips': set(),
-        'domains': set(),
-        'hashes': set(),
-        'urls': set(),
-        'commands': set()
+        'ips': [],
+        'domains': [],
+        'hashes': [],
+        'urls': []
     }
     
     # IP addresses
-    ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
-    iocs['ips'].update(re.findall(ip_pattern, log_content))
+    ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+    iocs['ips'] = list(set(re.findall(ip_pattern, log_content)))
     
     # Domains
-    domain_pattern = r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b'
-    iocs['domains'].update(re.findall(domain_pattern, log_content, re.IGNORECASE))
+    domain_pattern = r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'
+    potential_domains = list(set(re.findall(domain_pattern, log_content)))
+    iocs['domains'] = [d for d in potential_domains if '.' in d and not re.match(ip_pattern, d)][:10]
     
-    # File hashes (MD5, SHA1, SHA256)
-    hash_patterns = [
-        r'\b[a-fA-F0-9]{32}\b',  # MD5
-        r'\b[a-fA-F0-9]{40}\b',  # SHA1
-        r'\b[a-fA-F0-9]{64}\b',  # SHA256
-    ]
-    for pattern in hash_patterns:
-        iocs['hashes'].update(re.findall(pattern, log_content))
+    # MD5/SHA256 hashes
+    hash_pattern = r'\b[a-fA-F0-9]{32,64}\b'
+    iocs['hashes'] = list(set(re.findall(hash_pattern, log_content)))[:10]
     
     # URLs
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-    iocs['urls'].update(re.findall(url_pattern, log_content))
+    iocs['urls'] = list(set(re.findall(url_pattern, log_content)))[:10]
     
-    # Suspicious commands
-    cmd_patterns = [
-        r'(vssadmin[^\n]+)',
-        r'(mimikatz[^\n]+)',
-        r'(powershell[^\n]+)',
-        r'(reg\s+save[^\n]+)',
-    ]
-    for pattern in cmd_patterns:
-        iocs['commands'].update(re.findall(pattern, log_content, re.IGNORECASE))
-    
-    # Convert sets to lists
-    return {k: list(v) for k, v in iocs.items()}
+    return iocs
 
-def analyze_threats(log_content, filename):
-    """Analyze logs for threats using pattern matching"""
-    threats = []
-    threat_id = hashlib.md5(f"{filename}{datetime.now()}".encode()).hexdigest()[:12]
+
+def analyze_with_gemini(threat_data, log_snippet):
+    """
+    FREE AI Analysis using Google Gemini
+    No credit card required, 1500+ requests/day FREE!
+    """
+    if not model:
+        return {
+            'enabled': False,
+            'message': '⚠️ AI analysis disabled. Set GEMINI_API_KEY environment variable.',
+            'setup_url': 'https://aistudio.google.com/app/apikey'
+        }
     
-    for threat_type, patterns in THREAT_PATTERNS.items():
-        for pattern in patterns:
-            matches = re.finditer(pattern, log_content, re.IGNORECASE | re.MULTILINE)
-            for match in matches:
-                # Extract context
-                start = max(0, match.start() - 100)
-                end = min(len(log_content), match.end() + 100)
-                context = log_content[start:end]
-                
-                # Map to MITRE
-                mitre = MITRE_MAPPING.get(threat_type, {})
-                
-                threat = {
-                    'id': f"THR-{threat_id}-{len(threats)}",
-                    'type': threat_type.replace('_', ' ').title(),
-                    'severity': get_severity(threat_type),
-                    'confidence': get_confidence(threat_type, pattern),
-                    'matched_pattern': match.group(0),
-                    'context': context,
-                    'timestamp': datetime.now().isoformat(),
-                    'mitre': mitre,
-                    'description': get_threat_description(threat_type),
-                    'recommendations': get_recommendations(threat_type)
-                }
-                threats.append(threat)
+    try:
+        prompt = f"""You are an expert cybersecurity threat analyst. Analyze this security incident:
+
+**Threat Details:**
+- Type: {threat_data.get('rule_name')}
+- Severity: {threat_data.get('severity').upper()}
+- MITRE Technique: {threat_data.get('mitre_id')} - {threat_data.get('mitre_name')}
+- Tactic: {threat_data.get('mitre_tactic')}
+
+**Log Sample:**
+```
+{log_snippet[:1000]}
+```
+
+**IOCs Detected:**
+- IPs: {', '.join(threat_data.get('iocs', {}).get('ips', [])[:3])}
+- Domains: {', '.join(threat_data.get('iocs', {}).get('domains', [])[:3])}
+
+Provide a concise security analysis with:
+1. **Impact Assessment** (2 sentences)
+2. **Attack Context** (what the attacker is doing)
+3. **Immediate Actions** (3 specific steps)
+4. **Risk Level** (CRITICAL/HIGH/MEDIUM/LOW with brief reason)
+
+Keep response under 250 words, technical and actionable. Use bullet points for actions.
+"""
+        
+        response = model.generate_content(prompt)
+        
+        return {
+            'enabled': True,
+            'analysis': response.text,
+            'model': 'gemini-1.5-flash',
+            'cost': 'FREE'
+        }
+        
+    except Exception as e:
+        return {
+            'enabled': True,
+            'error': f'AI analysis failed: {str(e)}',
+            'fallback': 'Manual analysis recommended for this threat.'
+        }
+
+
+def detect_threats(log_content):
+    """Detect threats using pattern matching (Sigma-like rules)"""
+    threats = []
+    log_lower = log_content.lower()
+    
+    for rule in DETECTION_RULES:
+        matches = []
+        for pattern in rule['patterns']:
+            found = re.findall(pattern, log_lower, re.IGNORECASE)
+            if found:
+                matches.extend(found[:3])  # Limit to 3 matches per pattern
+        
+        if matches:
+            mitre_info = MITRE_TACTICS.get(rule['mitre'], {})
+            
+            threat = {
+                'rule_id': rule['id'],
+                'rule_name': rule['name'],
+                'severity': rule['severity'],
+                'mitre_id': rule['mitre'],
+                'mitre_name': mitre_info.get('name', 'Unknown'),
+                'mitre_tactic': mitre_info.get('tactic', 'Unknown'),
+                'matches': matches[:5],  # Top 5 matches
+                'timestamp': datetime.now().isoformat(),
+                'confidence': min(len(matches) * 25, 100)  # Confidence score
+            }
+            
+            threats.append(threat)
     
     return threats
 
-def get_severity(threat_type):
-    """Determine threat severity"""
-    severity_map = {
-        'ransomware': 'CRITICAL',
-        'credential_dumping': 'CRITICAL',
-        'c2_communication': 'HIGH',
-        'lateral_movement': 'HIGH',
-        'privilege_escalation': 'HIGH',
-        'suspicious_process': 'MEDIUM',
-        'persistence': 'MEDIUM'
-    }
-    return severity_map.get(threat_type, 'LOW')
 
-def get_confidence(threat_type, pattern):
-    """Calculate detection confidence"""
-    # In real implementation, use ML models
-    high_confidence_patterns = [
-        r'mimikatz', r'vssadmin.*delete', r'sekurlsa'
-    ]
-    for hp in high_confidence_patterns:
-        if re.search(hp, pattern, re.IGNORECASE):
-            return 95 + (5 * len(threat_type) % 5)
-    return 70 + (10 * len(pattern) % 20)
+@app.route('/')
+def index():
+    """Serve the main HTML page"""
+    return send_from_directory('.', 'threathunter_ai.html')
 
-def get_threat_description(threat_type):
-    """Get human-readable threat description"""
-    descriptions = {
-        'ransomware': 'Ransomware activity detected. File encryption and shadow copy deletion patterns observed.',
-        'credential_dumping': 'Credential theft attempt. LSASS memory access or registry hive export detected.',
-        'lateral_movement': 'Lateral movement activity. Remote authentication or file sharing patterns detected.',
-        'suspicious_process': 'Suspicious process execution. Potential obfuscation or payload delivery detected.',
-        'persistence': 'Persistence mechanism. Registry modification or scheduled task creation detected.',
-        'c2_communication': 'Command and Control communication. Suspicious network traffic patterns detected.'
-    }
-    return descriptions.get(threat_type, 'Unknown threat pattern detected.')
-
-def get_recommendations(threat_type):
-    """Get remediation recommendations"""
-    recommendations = {
-        'ransomware': [
-            'Immediately isolate affected systems from network',
-            'Terminate suspicious processes',
-            'Restore from backup if encryption occurred',
-            'Check for lateral movement to other hosts'
-        ],
-        'credential_dumping': [
-            'Reset compromised account credentials',
-            'Enable credential guard on Windows',
-            'Review account activity for unauthorized access',
-            'Deploy LSASS protection mechanisms'
-        ],
-        'lateral_movement': [
-            'Block source IP address',
-            'Review authentication logs for all accessed systems',
-            'Reset credentials for accounts used',
-            'Enable NTLM auditing'
-        ],
-        'suspicious_process': [
-            'Terminate suspicious process',
-            'Collect process memory dump for analysis',
-            'Scan with antivirus/EDR',
-            'Review process execution history'
-        ],
-        'persistence': [
-            'Remove unauthorized registry keys',
-            'Delete malicious scheduled tasks',
-            'Review startup locations',
-            'Audit service accounts'
-        ],
-        'c2_communication': [
-            'Block destination IP/domain at firewall',
-            'Investigate compromised host for malware',
-            'Capture network traffic for analysis',
-            'Check threat intelligence feeds'
-        ]
-    }
-    return recommendations.get(threat_type, ['Investigate the alert', 'Document findings'])
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze_logs():
-    """Main endpoint for log analysis"""
-    if 'files' not in request.files:
-        return jsonify({'error': 'No files uploaded'}), 400
-    
-    files = request.files.getlist('files')
-    results = []
-    
-    for file in files:
+    """Analyze uploaded log files for threats"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        
+        file = request.files['file']
         if file.filename == '':
-            continue
+            return jsonify({'error': 'Empty filename'}), 400
         
         # Read file content
-        content = file.read().decode('utf-8', errors='ignore')
+        try:
+            log_content = file.read().decode('utf-8', errors='ignore')
+        except Exception as e:
+            return jsonify({'error': f'Failed to read file: {str(e)}'}), 400
+        
+        if not log_content.strip():
+            return jsonify({'error': 'File is empty'}), 400
         
         # Extract IOCs
-        iocs = extract_iocs(content)
+        iocs = extract_iocs(log_content)
         
         # Detect threats
-        threats = analyze_threats(content, file.filename)
+        threats = detect_threats(log_content)
         
-        # Generate statistics
-        stats = {
-            'total_lines': len(content.split('\n')),
-            'total_threats': len(threats),
-            'critical_threats': sum(1 for t in threats if t['severity'] == 'CRITICAL'),
-            'high_threats': sum(1 for t in threats if t['severity'] == 'HIGH'),
-            'total_iocs': sum(len(v) for v in iocs.values()),
-            'unique_ips': len(iocs['ips']),
-            'unique_domains': len(iocs['domains'])
-        }
+        # Add IOCs to each threat
+        for threat in threats:
+            threat['iocs'] = iocs
         
-        result = {
+        # Add AI analysis to each threat (FREE with Gemini!)
+        log_lines = log_content.split('\n')
+        log_snippet = '\n'.join(log_lines[:30])  # First 30 lines
+        
+        for threat in threats:
+            threat['ai_analysis'] = analyze_with_gemini(threat, log_snippet)
+        
+        # Calculate statistics
+        severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        for threat in threats:
+            severity_counts[threat['severity']] += 1
+        
+        # Prepare response
+        response_data = {
+            'success': True,
             'filename': file.filename,
-            'analysis_time': datetime.now().isoformat(),
-            'statistics': stats,
-            'threats': threats[:20],  # Limit to first 20 for demo
-            'iocs': {k: v[:50] for k, v in iocs.items()},  # Limit IOCs
-            'summary': generate_summary(threats, iocs, stats)
+            'analyzed_at': datetime.now().isoformat(),
+            'statistics': {
+                'total_lines': len(log_lines),
+                'threats_detected': len(threats),
+                'severity_breakdown': severity_counts,
+                'unique_ips': len(iocs['ips']),
+                'unique_domains': len(iocs['domains']),
+                'unique_hashes': len(iocs['hashes']),
+                'risk_score': min(len(threats) * 15 + severity_counts['critical'] * 25, 100)
+            },
+            'threats': threats,
+            'iocs': iocs,
+            'ai_powered': model is not None,
+            'ai_model': 'gemini-1.5-flash (FREE)' if model else None
         }
         
-        results.append(result)
-    
-    return jsonify({
-        'success': True,
-        'files_analyzed': len(results),
-        'results': results
-    })
+        return jsonify(response_data)
+        
+    except Exception as e:
+        return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
 
-def generate_summary(threats, iocs, stats):
-    """Generate AI-style summary"""
-    critical_count = sum(1 for t in threats if t['severity'] == 'CRITICAL')
-    high_count = sum(1 for t in threats if t['severity'] == 'HIGH')
-    
-    if critical_count > 0:
-        risk_level = 'CRITICAL'
-        summary = f"⚠️ CRITICAL THREATS DETECTED: {critical_count} critical threats require immediate action. "
-    elif high_count > 0:
-        risk_level = 'HIGH'
-        summary = f"⚠️ HIGH RISK: {high_count} high-severity threats detected. "
-    else:
-        risk_level = 'MEDIUM'
-        summary = "ℹ️ Suspicious activity detected. Review recommended. "
-    
-    summary += f"Total of {stats['total_threats']} threats identified across {stats['total_lines']} log entries. "
-    summary += f"Extracted {stats['total_iocs']} indicators of compromise including {stats['unique_ips']} unique IP addresses. "
-    
-    # Add threat-specific guidance
-    if any('ransomware' in t['type'].lower() for t in threats):
-        summary += "RANSOMWARE activity detected - immediate isolation required. "
-    if any('credential' in t['type'].lower() for t in threats):
-        summary += "CREDENTIAL THEFT attempts observed - reset passwords immediately. "
-    
-    return {
-        'risk_level': risk_level,
-        'text': summary,
-        'recommendation': 'Immediate investigation required' if critical_count > 0 else 'Schedule investigation',
-    }
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
-        'status': 'operational',
-        'version': '1.0.0',
-        'sigma_rules': 2847,
-        'mitre_techniques': 180,
-        'ai_enabled': True
+        'status': 'healthy',
+        'ai_enabled': model is not None,
+        'ai_provider': 'Google Gemini (FREE)' if model else None,
+        'detection_rules': len(DETECTION_RULES),
+        'mitre_techniques': len(MITRE_TACTICS),
+        'timestamp': datetime.now().isoformat()
     })
 
-@app.route('/')
-def index():
-    """Serve the frontend"""
-    return send_file('threathunter_ai.html')
 
 if __name__ == '__main__':
-    print("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║          ThreatHunter AI - Backend Server                   ║
-    ║                                                              ║
-    ║  🚀 Server running on http://localhost:5000                 ║
-    ║  📡 API endpoint: http://localhost:5000/api/analyze         ║
-    ║  🎯 Upload logs and get real threat analysis!               ║
-    ╚══════════════════════════════════════════════════════════════╝
-    """)
+    port = int(os.environ.get('PORT', 5000))
     
-    app.run(debug=True, port=5000)
+    print("\n" + "="*60)
+    print("🎯 ThreatHunter AI - Starting Server")
+    print("="*60)
+    print(f"🌐 Server: http://0.0.0.0:{port}")
+    print(f"🤖 AI Status: {'✅ Enabled (FREE Gemini)' if model else '⚠️ Disabled'}")
+    print(f"📊 Detection Rules: {len(DETECTION_RULES)}")
+    print(f"🎯 MITRE Techniques: {len(MITRE_TACTICS)}")
+    if not model:
+        print("\n⚠️  To enable FREE AI analysis:")
+        print("   1. Get API key: https://aistudio.google.com/app/apikey")
+        print("   2. Set: GEMINI_API_KEY=your-key-here")
+    print("="*60 + "\n")
+    
+    app.run(host='0.0.0.0', port=port, debug=False)
