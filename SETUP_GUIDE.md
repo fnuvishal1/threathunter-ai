@@ -104,8 +104,8 @@ git add .
 # Make first commit
 git commit -m "Initial commit: ThreatHunter AI v1.0 - Production-ready threat detection platform"
 
-# Add GitHub remote (replace fnuvishal1)
-git remote add origin https://github.com/fnuvishal1/threathunter-ai.git
+# Add GitHub remote (replace YOUR_USERNAME)
+git remote add origin https://github.com/YOUR_USERNAME/threathunter-ai.git
 
 # Push to GitHub
 git branch -M main
@@ -119,7 +119,7 @@ Add these to the top of your README.md:
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MITRE](https://img.shields.io/badge/MITRE%20ATT%26CK-180%2B%20techniques-red)](https://attack.mitre.org/)
-[![Status](https://img.shields.io/badge/status-production--ready-success)](https://github.com/fnuvishal1/threathunter-ai)
+[![Status](https://img.shields.io/badge/status-production--ready-success)](https://github.com/YOUR_USERNAME/threathunter-ai)
 ```
 
 ---
@@ -152,7 +152,7 @@ hunting platform that combines AI with Sigma detection rules.
 Unlike commercial SIEMs costing $100K+, this is 100% open-source
 and works offline. Upload logs → Get threats → Export reports.
 
-🔗 GitHub: https://github.com/fnuvishal1/threathunter-ai
+🔗 GitHub: https://github.com/YOUR_USERNAME/threathunter-ai
 🎥 Demo: [upload a quick demo video]
 
 This project demonstrates my skills in:
@@ -295,7 +295,7 @@ that processes 10,000+ events/second using Sigma rules and AI analysis.
 The project demonstrates my understanding of detection engineering, 
 MITRE ATT&CK, and scalable backend development.
 
-GitHub: https://github.com/fnuvishal1/threathunter-ai
+GitHub: https://github.com/YOUR_USERNAME/threathunter-ai
 Live Demo: [if deployed]
 
 Key achievements:

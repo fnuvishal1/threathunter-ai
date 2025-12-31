@@ -93,7 +93,7 @@ Modern web browser
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/fnuvishal1/threathunter-ai.git
+git clone https://github.com/yourusername/threathunter-ai.git
 cd threathunter-ai
 
 # 2. Install dependencies
@@ -399,8 +399,8 @@ MIT License - Free to use, modify, distribute
 
 ## 📞 **Support & Contributing**
 
-- **Issues**: [GitHub Issues](https://github.com/fnuvishal1/threathunter-ai/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/fnuvishal1/threathunter-ai/discussions)
+- **Issues**: [GitHub Issues](https://github.com/yourusername/threathunter-ai/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/yourusername/threathunter-ai/discussions)
 - **Pull Requests**: Always welcome!
 
 ---
